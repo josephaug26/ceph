@@ -52,3 +52,5 @@ overrides:
       - FS_DEGRADED
       - OSDMAP_FLAGS
       - OSD_UPGRADE_FINISHED
+      - CEPHADM_FAILED_DAEMON
+      - pg .* is stuck undersized
