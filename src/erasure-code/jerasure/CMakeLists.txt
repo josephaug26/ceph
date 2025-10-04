@@ -3,7 +3,8 @@
 set(jerasure_utils_src
   ErasureCodePluginJerasure.cc
   ErasureCodeJerasure.cc
-  ErasureCodeSimpleXOR.cc)
+  ErasureCodeSimpleXOR.cc
+  ErasureCodeSizeCeph.cc)
 
 add_library(jerasure_utils OBJECT ${jerasure_utils_src})
 target_link_libraries(jerasure_utils legacy-option-headers)
