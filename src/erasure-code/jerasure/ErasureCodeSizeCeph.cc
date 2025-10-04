@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <dlfcn.h>
 #include <cstring>
+#include <cstdlib>
+#include <vector>
 
 using std::ostream;
 using ceph::ErasureCodeProfile;
@@ -22,24 +24,56 @@ bool ErasureCodeSizeCeph::load_sizeceph_library() {
     return true;
   }
   
-  // Try to load the sizeceph library from several possible locations
-  const char* lib_paths[] = {
-    "/home/joseph/code/sizeceph/sizeceph.so",
-    "./sizeceph.so",
-    "sizeceph.so",
-    nullptr
-  };
-  
-  for (int i = 0; lib_paths[i] != nullptr; i++) {
-    sizeceph_handle = dlopen(lib_paths[i], RTLD_LAZY);
+  // Check for environment variable override first
+  const char* env_path = std::getenv("SIZECEPH_LIBRARY_PATH");
+  if (env_path) {
+    sizeceph_handle = dlopen(env_path, RTLD_LAZY);
     if (sizeceph_handle) {
-      break;
+      std::cout << "SizeCeph library loaded from environment path: " << env_path << std::endl;
+    } else {
+      std::cerr << "Failed to load SizeCeph library from environment path: " << env_path 
+                << " - " << dlerror() << std::endl;
     }
   }
   
+  // If environment override failed or wasn't set, try standard paths
   if (!sizeceph_handle) {
-    std::cerr << "Cannot load sizeceph library: " << dlerror() << std::endl;
-    return false;
+    // Try to load the sizeceph library from standard system paths first,
+    // then fall back to development locations
+    const char* lib_paths[] = {
+      // Standard system library paths (installed via 'make install')
+      "/usr/local/lib/sizeceph.so",      // Primary install location
+      "/usr/lib/sizeceph.so",            // Alternative system location
+      "/usr/lib/x86_64-linux-gnu/sizeceph.so",  // Debian/Ubuntu multiarch path
+      // Library search path (let system find it)
+      "sizeceph.so",                     // Uses LD_LIBRARY_PATH and system paths
+      // Development fallback paths
+      "/home/joseph/code/sizeceph/sizeceph.so",  // Development directory
+      "./sizeceph.so",                   // Current directory
+      nullptr
+    };
+    
+    for (int i = 0; lib_paths[i] != nullptr; i++) {
+      sizeceph_handle = dlopen(lib_paths[i], RTLD_LAZY);
+      if (sizeceph_handle) {
+        std::cout << "SizeCeph library loaded from: " << lib_paths[i] << std::endl;
+        break;
+      }
+    }
+    
+    if (!sizeceph_handle) {
+      std::cerr << "Cannot load sizeceph library from any location: " << dlerror() << std::endl;
+      std::cerr << "Tried paths:" << std::endl;
+      if (env_path) {
+        std::cerr << "  - " << env_path << " (from SIZECEPH_LIBRARY_PATH)" << std::endl;
+      }
+      for (int i = 0; lib_paths[i] != nullptr; i++) {
+        std::cerr << "  - " << lib_paths[i] << std::endl;
+      }
+      std::cerr << "Install sizeceph.so using: cd /path/to/sizeceph && make install" << std::endl;
+      std::cerr << "Or set SIZECEPH_LIBRARY_PATH environment variable" << std::endl;
+      return false;
+    }
   }
   
   // Load function symbols

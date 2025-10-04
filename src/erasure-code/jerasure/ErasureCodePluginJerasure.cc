@@ -20,7 +20,6 @@
 #include "ErasureCodeJerasure.h"
 #include "ErasureCodePluginJerasure.h"
 #include "jerasure_init.h"
-#include "ErasureCodeSimpleXOR.h"
 #include "ErasureCodeSizeCeph.h"
 
 #define dout_context g_ceph_context
@@ -55,15 +54,13 @@ int ErasureCodePluginJerasure::factory(const std::string& directory,
       interface = new ErasureCodeJerasureBlaumRoth();
     } else if (t == "liber8tion") {
       interface = new ErasureCodeJerasureLiber8tion();
-    } else if (t == "simple_xor") {
-      interface = new ErasureCodeSimpleXOR();
     } else if (t == "sizeceph") {
       interface = new ErasureCodeSizeCeph();
     } else {
       *ss << "technique=" << t << " is not a valid coding technique. "
 	   << " Choose one of the following: "
 	   << "reed_sol_van, reed_sol_r6_op, cauchy_orig, "
-	   << "cauchy_good, liberation, blaum_roth, liber8tion, simple_xor, sizeceph";
+	   << "cauchy_good, liberation, blaum_roth, liber8tion, sizeceph";
       return -ENOENT;
     }
     dout(20) << __func__ << ": " << profile << dendl;
