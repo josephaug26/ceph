@@ -17,6 +17,7 @@
 
 #include "common/dout.h"
 #include "include/scope_guard.h"
+#include "common/XMLFormatter.h"
 #include "common/Clock.h"
 #include "common/armor.h"
 #include "common/async/spawn_throttle.h"
@@ -7226,7 +7227,7 @@ void RGWCompleteMultipart::execute(optional_yield y)
   op_ret =
     upload->complete(this, y, s->cct, parts->parts, remove_objs, accounted_size,
                      compressed, cs_info, ofs, s->req_id, s->owner, olh_epoch,
-                     s->object.get(), processed_prefixes);
+                     s->object.get(), processed_prefixes, if_match, if_nomatch);
   if (op_ret < 0) {
     ldpp_dout(this, 0) << "ERROR: upload complete failed ret=" << op_ret << dendl;
     return;

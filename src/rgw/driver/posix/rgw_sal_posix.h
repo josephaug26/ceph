@@ -481,7 +481,7 @@ public:
   POSIXDriver(CephContext *_cct) : StoreDriver(), cct(_cct), zone(this)
   {
     const static std::string tenant = "default_ns";
-    const auto& db_path = g_conf().get_val<std::string>("dbstore_db_dir");
+    const auto& db_path = g_conf().get_val<std::string>("rgw_posix_userdb_dir");
     const auto& db_name = g_conf().get_val<std::string>("dbstore_db_name_prefix") + "-" + tenant;
     auto db_full_path = std::filesystem::path(db_path) / db_name;
     
@@ -1284,7 +1284,9 @@ public:
 		       std::string& tag, ACLOwner& owner,
 		       uint64_t olh_epoch,
 		       rgw::sal::Object* target_obj,
-		       prefix_map_t& processed_prefixes) override;
+		       prefix_map_t& processed_prefixes,
+           const char *if_match = nullptr,
+           const char *if_nomatch = nullptr) override;
   virtual int cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
                                      CephContext *cct, optional_yield y,
                                      const rgw_obj& obj,

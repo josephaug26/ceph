@@ -11,6 +11,7 @@
   <cd-table
     [data]="prometheusAlertService.alerts"
     [columns]="columns"
+    [extraFilterableColumns]="filters"
     identifier="fingerprint"
     [forceIdentifier]="true"
     [customCss]="customCss"
@@ -36,6 +37,8 @@
       [data]="expandedRow"
       [customCss]="customCss"
       [autoReload]="false"
+      [showMultiLineText]="true"
+      [multilineTextKeys]="multilineTextKeys"
     >
     </cd-table-key-value>
     } @else if (expandedRow?.alert_count > 1) {
@@ -60,6 +63,8 @@
         [data]="expandedInnerRow"
         [customCss]="customCss"
         [autoReload]="false"
+        [showMultiLineText]="true"
+        [multilineTextKeys]="multilineTextKeys"
       >
       </cd-table-key-value> }
     </cd-table>
