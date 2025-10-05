@@ -55,7 +55,9 @@ int ErasureCodePluginJerasure::factory(const std::string& directory,
     } else if (t == "liber8tion") {
       interface = new ErasureCodeJerasureLiber8tion();
     } else if (t == "sizeceph") {
+      dout(0) << "*** CREATING SIZECEPH ERASURE CODE INSTANCE ***" << dendl;
       interface = new ErasureCodeSizeCeph();
+      dout(0) << "*** SIZECEPH INSTANCE CREATED SUCCESSFULLY ***" << dendl;
     } else {
       *ss << "technique=" << t << " is not a valid coding technique. "
 	   << " Choose one of the following: "
