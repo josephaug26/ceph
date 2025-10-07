@@ -49,6 +49,9 @@ private:
   
   bool load_sizeceph_library();
   void unload_sizeceph_library();
+  
+  // Helper function for internal padding
+  static inline int calculate_aligned_size(int original_size);
 };
 
 #endif // CEPH_ERASURE_CODE_SIZE_CEPH_H

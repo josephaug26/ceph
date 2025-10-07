@@ -130,39 +130,6 @@ void ErasureCodeSizeCeph::unload_sizeceph_library() {
   }
 }
 
-/*
- * SizeCeph Encode Process - Internal Padding Approach #3
- * 
- * This function implements transparent internal padding to bridge the gap between:
- * - Ceph's flexible object sizes (any size, e.g., "Hello World!" = 25 bytes)
- * - SizeCeph's block alignment requirements (512-byte disk sectors)
- * 
- * Memory Flow Example ("Hello World!" - 25 bytes):
- * 
- * Ceph Input:    [25 bytes] [25 bytes] [25 bytes] [25 bytes]
- *      ↓ (internal padding)
- * Internal:      [512 bytes] [512 bytes] [512 bytes] [512 bytes]
- *      ↓ (interleaving)
- * SizeCeph:      [2048 bytes interleaved]
- *      ↓ (SizeCeph algorithm)
- * Output:        9 × [512 bytes] (4 data + 5 coding)
- *      ↓ (trim padding)
- * Ceph Output:   [25 bytes] [25 bytes] [25 bytes] [25 bytes] + 5 × [25 bytes coding]
- * 
- * Steps:
- * 1. Accept any object size from Ceph (alignment=1, no forced padding)
- * 2. Calculate internal padding requirements (round up to 512-byte + 4-byte alignment)
- * 3. Create padded data chunks (temporary buffers with zero padding)
- * 4. Create interleaved buffer for SizeCeph (byte-by-byte interleaving)
- * 5. Call SizeCeph library with properly aligned, interleaved data
- * 6. Trim padding and return original-sized chunks to Ceph
- * 
- * Benefits:
- * - Ceph is completely unaware of internal padding
- * - Storage efficiency: only original size stored (25 bytes, not 512)
- * - SizeCeph compatibility: gets required block alignment
- * - Maintains original block driver semantics
- */
 void ErasureCodeSizeCeph::jerasure_encode(char **data, char **coding, int blocksize) {
   dout(10) << "SizeCeph encode: original blocksize=" << blocksize << " k=" << k << " m=" << m << dendl;
   
@@ -236,40 +203,6 @@ void ErasureCodeSizeCeph::jerasure_encode(char **data, char **coding, int blocks
   dout(10) << "SizeCeph encode: encoding completed successfully" << dendl;
 }
 
-/*
- * SizeCeph Decode Process - Internal Padding Approach #3
- * 
- * This function reverses the encode process to restore missing data chunks.
- * Handles erasure recovery while maintaining transparent internal padding.
- * 
- * Memory Flow Example (Recovering 25-byte chunks with 2 erasures):
- * 
- * Ceph Input:    [25 bytes] [NULL] [25 bytes] [NULL] + 5 × [25 bytes coding]
- *      ↓ (internal padding)
- * Internal:      [512 bytes] [NULL] [512 bytes] [NULL] + 5 × [512 bytes coding]
- *      ↓ (SizeCeph restore)
- * SizeCeph:      [2048 bytes interleaved restored data]
- *      ↓ (de-interleaving)
- * Restored:      [512 bytes] [512 bytes] [512 bytes] [512 bytes]
- *      ↓ (trim padding)
- * Ceph Output:   [25 bytes] [25 bytes] [25 bytes] [25 bytes]
- * 
- * Steps:
- * 1. Accept any object size from Ceph with erasure information
- * 2. Calculate same internal padding requirements as encode
- * 3. Pad available chunks to SizeCeph requirements (512 bytes)
- * 4. Set up input chunks array with NULL for erased chunks
- * 5. Check if restoration is possible with available chunks
- * 6. Call SizeCeph restore function with padded, aligned data
- * 7. De-interleave restored data back to individual chunks
- * 8. Trim padding and return original-sized chunks to Ceph
- * 
- * Key Features:
- * - Handles up to 5 erasures (m=5 in k=4,m=5 configuration)
- * - Maintains padding consistency between encode/decode
- * - Only restores erased chunks (leaves available chunks unchanged)
- * - Transparent to Ceph (input/output in original sizes)
- */
 int ErasureCodeSizeCeph::jerasure_decode(int *erasures, char **data, char **coding, int blocksize) {
   dout(10) << "SizeCeph decode: original blocksize=" << blocksize << " k=" << k << " m=" << m << dendl;
   
@@ -364,7 +297,7 @@ int ErasureCodeSizeCeph::jerasure_decode(int *erasures, char **data, char **codi
   dout(15) << "SizeCeph decode: size_restore completed successfully, de-interleaving data" << dendl;
   
   // De-interleave restored data back to individual chunks (trim padding)
-  for (int i = 0; i < aligned_size; i++) {
+  for (int i = 0; i < blocksize; i++) {
     for (int j = 0; j < k; j++) {
       // Only restore erased data chunks
       bool chunk_was_erased = false;
@@ -374,8 +307,7 @@ int ErasureCodeSizeCeph::jerasure_decode(int *erasures, char **data, char **codi
           break;
         }
       }
-      if (chunk_was_erased && i < blocksize) {
-        // Only copy data within original blocksize (trim padding)
+      if (chunk_was_erased) {
         ((unsigned char*)data[j])[i] = output_buffer[i * k + j];
       }
     }
@@ -383,20 +315,6 @@ int ErasureCodeSizeCeph::jerasure_decode(int *erasures, char **data, char **codi
   
   dout(10) << "SizeCeph decode: decoding completed successfully" << dendl;
   return 0;
-}
-
-int ErasureCodeSizeCeph::parse(ceph::ErasureCodeProfile& profile, std::ostream *ss) {
-  // SizeCeph has fixed parameters: k=4, m=5, w=8
-  // Override any user-provided values to ensure SizeCeph compatibility
-  profile["k"] = "4";
-  profile["m"] = "5"; 
-  profile["w"] = "8";
-  profile["technique"] = "sizeceph";
-  
-  dout(10) << "SizeCeph parse: enforcing k=4, m=5, w=8 configuration" << dendl;
-  
-  // Call parent parse with fixed SizeCeph parameters
-  return ErasureCodeJerasure::parse(profile, ss);
 }
 
 unsigned ErasureCodeSizeCeph::get_alignment() const {
@@ -435,24 +353,4 @@ void ErasureCodeSizeCeph::apply_delta(const shard_id_map<ceph::bufferptr> &in,
   for (auto& pair : in) {
     out[pair.first] = pair.second;
   }
-}
-
-int ErasureCodeSizeCeph::_minimum_to_decode(const shard_id_set &want_to_read,
-                                            const shard_id_set &available_chunks,
-                                            shard_id_set *minimum) {
-  // SizeCeph requires at least k (4) chunks to decode any data
-  // This is the same logic as standard Reed-Solomon
-  if (available_chunks.size() < (unsigned)k) {
-    return -1; // Not enough chunks available
-  }
-  
-  // For SizeCeph, we need k chunks minimum to decode anything
-  // Just use the first k available chunks
-  auto it = available_chunks.begin();
-  minimum->clear();
-  for (int i = 0; i < k && it != available_chunks.end(); ++i, ++it) {
-    minimum->insert(*it);
-  }
-  
-  return 0;
 }
