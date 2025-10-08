@@ -21,6 +21,7 @@ add_subdirectory(jerasure)
 add_subdirectory(lrc)
 add_subdirectory(shec)
 add_subdirectory(clay)
+add_subdirectory(sizeceph)
 add_subdirectory(consistency)
 
 if(HAVE_NASM_X64_AVX2 OR HAVE_ARMV8_SIMD)
@@ -43,4 +44,5 @@ add_custom_target(erasure_code_plugins DEPENDS
     ec_lrc
     ec_jerasure
     ec_shec
-    ec_clay)
+    ec_clay
+    ec_sizeceph)

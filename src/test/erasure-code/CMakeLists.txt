@@ -93,6 +93,32 @@ target_link_libraries(unittest_erasure_code_plugin_jerasure
 add_dependencies(unittest_erasure_code_plugin_jerasure
   ec_jerasure)
 
+# unittest_erasure_code_sizeceph
+add_executable(unittest_erasure_code_sizeceph
+  test_ErasureCodeSizeCeph.cc
+  $<TARGET_OBJECTS:unit-main>
+  )
+add_ceph_unittest(unittest_erasure_code_sizeceph)
+target_link_libraries(unittest_erasure_code_sizeceph
+  global
+  ceph-common
+  ec_sizeceph)
+add_dependencies(unittest_erasure_code_sizeceph
+  ec_sizeceph)
+
+# unittest_erasure_code_sizeceph_integration  
+add_executable(unittest_erasure_code_sizeceph_integration
+  test_ErasureCodeSizeCeph_integration.cc
+  $<TARGET_OBJECTS:unit-main>
+  )
+add_ceph_unittest(unittest_erasure_code_sizeceph_integration)
+target_link_libraries(unittest_erasure_code_sizeceph_integration
+  global
+  ceph-common
+  ec_sizeceph)
+add_dependencies(unittest_erasure_code_sizeceph_integration
+  ec_sizeceph)
+
 if(WITH_EC_ISA_PLUGIN)
 
 #unittest_erasure_code_isa
