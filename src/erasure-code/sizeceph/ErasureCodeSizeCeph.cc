@@ -55,18 +55,36 @@ int ErasureCodeSizeCeph::init(ceph::ErasureCodeProfile &profile_arg, std::ostrea
   // Merge provided profile with defaults
   profile = profile_arg;
   
+  // Check for force_all_chunks mode
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
   // Validate k and m values
   auto k_iter = profile.find("k");
   auto m_iter = profile.find("m");
   
-  if (k_iter != profile.end() && std::stoi(k_iter->second) != (int)SIZECEPH_K) {
-    *ss << "SizeCeph only supports k=" << SIZECEPH_K << ", got k=" << k_iter->second;
-    return -EINVAL;
-  }
-  
-  if (m_iter != profile.end() && std::stoi(m_iter->second) != (int)SIZECEPH_M) {
-    *ss << "SizeCeph only supports m=" << SIZECEPH_M << ", got m=" << m_iter->second;
-    return -EINVAL;
+  if (force_all_chunks) {
+    // In force_all_chunks mode, accept k=9, m=0 (all chunks treated as data)
+    dout(10) << "SizeCeph force_all_chunks mode enabled" << dendl;
+    if (k_iter != profile.end() && std::stoi(k_iter->second) != 9) {
+      *ss << "SizeCeph force_all_chunks mode requires k=9, got k=" << k_iter->second;
+      return -EINVAL;
+    }
+    if (m_iter != profile.end() && std::stoi(m_iter->second) != 0) {
+      *ss << "SizeCeph force_all_chunks mode requires m=0, got m=" << m_iter->second;
+      return -EINVAL;
+    }
+  } else {
+    // Standard mode: k=4, m=5
+    if (k_iter != profile.end() && std::stoi(k_iter->second) != (int)SIZECEPH_K) {
+      *ss << "SizeCeph only supports k=" << SIZECEPH_K << ", got k=" << k_iter->second;
+      return -EINVAL;
+    }
+    
+    if (m_iter != profile.end() && std::stoi(m_iter->second) != (int)SIZECEPH_M) {
+      *ss << "SizeCeph only supports m=" << SIZECEPH_M << ", got m=" << m_iter->second;
+      return -EINVAL;
+    }
   }
   
   // Load the SizeCeph library
@@ -307,6 +325,30 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
                                 shard_id_map<ceph::bufferlist> *encoded) {
   dout(10) << "SizeCeph encode: size=" << in.length() 
            << " want=" << want_to_encode.size() << dendl;
+  
+  // Check for force_all_chunks mode
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
+  if (force_all_chunks) {
+    dout(10) << "SizeCeph encode: force_all_chunks mode - ensuring all 9 chunks are requested" << dendl;
+    
+    // In force_all_chunks mode, verify that all 9 chunks are being requested
+    if (want_to_encode.size() != SIZECEPH_N) {
+      dout(0) << "SizeCeph encode: force_all_chunks mode requires all " << SIZECEPH_N 
+              << " chunks to be requested, got " << want_to_encode.size() << dendl;
+      return -EINVAL;
+    }
+    
+    // Verify that chunk IDs are 0-8
+    for (const auto& shard : want_to_encode) {
+      if (shard.id < 0 || shard.id >= (int)SIZECEPH_N) {
+        dout(0) << "SizeCeph encode: invalid chunk ID " << shard.id 
+                << " in force_all_chunks mode" << dendl;
+        return -EINVAL;
+      }
+    }
+  }
   
   if (in.length() == 0) {
     dout(10) << "SizeCeph encode: empty input, creating empty chunks" << dendl;
