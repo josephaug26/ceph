@@ -172,6 +172,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-tags>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-private-field>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-address-of-packed-member>)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-unknown-warning-option>)
   add_compile_options(
     -Wno-unused-function
     -Wno-unused-local-typedef
@@ -1133,8 +1134,8 @@ endif(WITH_KVS)
 if(WITH_RADOSGW)
   if(WITH_RADOSGW_SELECT_PARQUET OR WITH_RADOSGW_ARROW_FLIGHT)
     if(WITH_SYSTEM_ARROW)
-      find_package(Arrow 4 REQUIRED QUIET)
-      find_package(Parquet 4 REQUIRED QUIET)
+      find_package(Arrow 9 REQUIRED QUIET)
+      find_package(Parquet 9 REQUIRED QUIET)
     else()
       # find arrow's dependencies
       if (WITH_SYSTEM_UTF8PROC)

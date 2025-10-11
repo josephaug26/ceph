@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <boost/algorithm/string/case_conv.hpp>
 #include <cstdint>
@@ -6368,7 +6368,11 @@ AWSSignerV4::prepare(const DoutPrefixProvider *dpp,
   if (opt_content) {
     content_hash = rgw::auth::s3::calc_v4_payload_hash(opt_content->to_str());
     extra_headers["x-amz-content-sha256"] = content_hash;
-
+  } else {
+    /* Some S3-compatible services require x-amz-content-sha256 header to always
+     * be present and included in the signature, even for unsigned payload.
+     * AWS S3 specification states that this header is required for all requests. */
+    extra_headers["x-amz-content-sha256"] = AWS4_UNSIGNED_PAYLOAD_HASH;
   }
 
   /* craft canonical headers */

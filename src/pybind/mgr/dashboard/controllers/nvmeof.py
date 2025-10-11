@@ -7,6 +7,7 @@ import cherrypy
 from orchestrator import OrchestratorError
 
 from .. import mgr
+from ..exceptions import DashboardException
 from ..model import nvmeof as model
 from ..security import Scope
 from ..services.nvmeof_cli import NvmeofCLICommand, convert_to_bytes
@@ -103,6 +104,36 @@ else:
                 NVMeoFClient.pb2.set_gateway_log_level_req(log_level=log_level)
             )
             return gw_log_level
+
+        @ReadPermission
+        @Endpoint('GET', '/stats')
+        @NvmeofCLICommand(
+            "nvmeof gateway get_stats", model.GatewayStatsInfo, alias="nvmeof gw get_stats")
+        @EndpointDoc("Get NVMeoF statistics for the gateway")
+        @convert_to_model(model.GatewayStatsInfo)
+        @handle_nvmeof_error
+        def get_gw_stats(self, gw_group: Optional[str] = None, traddr: Optional[str] = None):
+            gw_stats = NVMeoFClient(gw_group=gw_group,
+                                    traddr=traddr).stub.get_gateway_stats(
+                NVMeoFClient.pb2.get_gateway_stats_req()
+            )
+            return gw_stats
+
+        @ReadPermission
+        @Endpoint('GET', '/listener_info')
+        @NvmeofCLICommand(
+            "nvmeof gateway listener_info", model.GatewayListenersInfo,
+            alias="nvmeof gw listener_info")
+        @EndpointDoc("Get NVMeoF gateway's listeners info")
+        @convert_to_model(model.GatewayListenersInfo)
+        @handle_nvmeof_error
+        def listener_info(self, nqn: str, gw_group: Optional[str] = None,
+                          traddr: Optional[str] = None):
+            gw_listener_info = NVMeoFClient(gw_group=gw_group,
+                                            traddr=traddr).stub.show_gateway_listeners_info(
+                NVMeoFClient.pb2.show_gateway_listeners_info_req(subsystem_nqn=nqn)
+            )
+            return gw_listener_info
 
     @APIRouter("/nvmeof/spdk", Scope.NVME_OF)
     @APIDoc("NVMe-oF SPDK Management API", "NVMe-oF SPDK")
@@ -435,13 +466,13 @@ else:
             )
 
         @EndpointDoc(
-            "Create a new NVMeoF namespace",
+            "Create a new NVMeoF namespace.",
             parameters={
                 "nqn": Param(str, "NVMeoF subsystem NQN"),
                 "rbd_pool": Param(str, "RBD pool name"),
                 "rbd_image_name": Param(str, "RBD image name"),
                 "create_image": Param(bool, "Create RBD image"),
-                "size": Param(int, "RBD image size"),
+                "size": Param(int, "Deprecated. Use `rbd_image_size` instead"),
                 "rbd_image_size": Param(int, "RBD image size"),
                 "trash_image": Param(bool, "Trash the RBD image when namespace is removed"),
                 "block_size": Param(int, "NVMeoF namespace block size"),
@@ -523,6 +554,14 @@ else:
             gw_group: Optional[str] = None,
             traddr: Optional[str] = None,
         ):
+            if size and rbd_image_size:
+                raise DashboardException(
+                    msg="Can use size or rbd_image_size but not both",
+                    code="can_use_size_or_rbd_image_size_but_not_both",
+                    http_status_code=400,
+                    component="nvmeof",
+                )
+
             size_b = rbd_image_size_b = None
             if size:
                 size_b = convert_to_bytes(size, default_unit='MB')
