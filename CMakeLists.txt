@@ -487,6 +487,8 @@ endif()
 if(NOT WIN32)
   # require libcurl with good curl_multi_wait(), see https://tracker.ceph.com/issues/15915
   find_package(CURL 7.32 REQUIRED)
+  # Force use of shared libcurl to avoid SSL linking issues
+  set(CURL_LIBRARIES "/usr/lib/x86_64-linux-gnu/libcurl.so")
 endif()
 
 find_package(OpenSSL REQUIRED)

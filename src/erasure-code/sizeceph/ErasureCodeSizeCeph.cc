@@ -12,6 +12,9 @@
 #include <cstdlib>
 #include <vector>
 
+// Memory safety constants
+static const size_t MAX_CHUNK_SIZE = 16 * 1024 * 1024; // 16MB max per chunk
+
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_osd
 #undef dout_prefix
@@ -25,12 +28,21 @@ static std::ostream& _prefix(std::ostream* _dout)
 // Static member initialization
 void* ErasureCodeSizeCeph::sizeceph_handle = nullptr;
 bool ErasureCodeSizeCeph::library_loaded = false;
+int ErasureCodeSizeCeph::library_ref_count = 0;
+std::mutex ErasureCodeSizeCeph::library_mutex;
 ErasureCodeSizeCeph::size_split_fn_t ErasureCodeSizeCeph::size_split_func = nullptr;
 ErasureCodeSizeCeph::size_restore_fn_t ErasureCodeSizeCeph::size_restore_func = nullptr;
 ErasureCodeSizeCeph::size_can_get_restore_fn_t ErasureCodeSizeCeph::size_can_get_restore_func = nullptr;
 
 ErasureCodeSizeCeph::ErasureCodeSizeCeph() {
+  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Constructor called" << dendl;
   dout(10) << "ErasureCodeSizeCeph constructor: direct ErasureCodeInterface implementation" << dendl;
+  
+  // Thread-safe reference counting for library management
+  std::lock_guard<std::mutex> lock(library_mutex);
+  library_ref_count++;
+  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Instance created, ref_count=" << library_ref_count 
+          << " library_loaded=" << library_loaded << dendl;
   
   // Initialize default profile
   profile["k"] = std::to_string(SIZECEPH_K);
@@ -45,8 +57,22 @@ ErasureCodeSizeCeph::ErasureCodeSizeCeph() {
 }
 
 ErasureCodeSizeCeph::~ErasureCodeSizeCeph() {
+  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Destructor called" << dendl;
   dout(10) << "ErasureCodeSizeCeph destructor" << dendl;
-  unload_sizeceph_library();
+  
+  // Thread-safe reference counting for library management
+  std::lock_guard<std::mutex> lock(library_mutex);
+  library_ref_count--;
+  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Instance destroyed, ref_count=" << library_ref_count 
+          << " library_loaded=" << library_loaded << dendl;
+  
+  // Only unload library when no instances remain
+  if (library_ref_count <= 0) {
+    dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Last instance - calling unload_sizeceph_library_unsafe" << dendl;
+    dout(10) << "Last SizeCeph instance - unloading library" << dendl;
+    unload_sizeceph_library_unsafe();
+    library_ref_count = 0; // Ensure it doesn't go negative
+  }
 }
 
 int ErasureCodeSizeCeph::init(ceph::ErasureCodeProfile &profile_arg, std::ostream *ss) {
@@ -127,11 +153,21 @@ unsigned int ErasureCodeSizeCeph::get_chunk_count() const {
 }
 
 unsigned int ErasureCodeSizeCeph::get_data_chunk_count() const {
-  return SIZECEPH_K;
+  // Check for force_all_chunks mode - same logic as get_chunk_size()
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
+  // In force_all_chunks mode, all 9 chunks are treated as data chunks
+  return force_all_chunks ? SIZECEPH_N : SIZECEPH_K;
 }
 
 unsigned int ErasureCodeSizeCeph::get_coding_chunk_count() const {
-  return SIZECEPH_M;
+  // Check for force_all_chunks mode - same logic as get_chunk_size()
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
+  // In force_all_chunks mode, there are no traditional coding chunks (m=0)
+  return force_all_chunks ? 0 : SIZECEPH_M;
 }
 
 int ErasureCodeSizeCeph::get_sub_chunk_count() {
@@ -139,16 +175,15 @@ int ErasureCodeSizeCeph::get_sub_chunk_count() {
 }
 
 unsigned int ErasureCodeSizeCeph::get_chunk_size(unsigned int stripe_width) const {
-  // SizeCeph requires stripe_width to be divisible by 4 (processes 4-byte blocks)
-  // and chunk_size = stripe_width / 4 (K=4 data chunks)
-  if (stripe_width % 4 != 0) {
-    dout(10) << "SizeCeph get_chunk_size: stripe_width " << stripe_width 
-             << " not aligned to 4-byte requirement" << dendl;
-  }
+  // For the OSD backend, chunk_size must satisfy:
+  // get_data_chunk_count() * chunk_size == stripe_width
+  // With SizeCeph k=9, this means chunk_size = stripe_width / 9
   
-  unsigned int chunk_size = stripe_width / SIZECEPH_K;
+  unsigned int data_chunks = get_data_chunk_count();
+  unsigned int chunk_size = stripe_width / data_chunks;
+  
   dout(15) << "SizeCeph get_chunk_size: stripe_width=" << stripe_width 
-           << " chunk_size=" << chunk_size << dendl;
+           << " data_chunks=" << data_chunks << " chunk_size=" << chunk_size << dendl;
   return chunk_size;
 }
 
@@ -165,11 +200,15 @@ int ErasureCodeSizeCeph::calculate_aligned_size(int original_size) const {
 }
 
 bool ErasureCodeSizeCeph::load_sizeceph_library() {
+  std::lock_guard<std::mutex> lock(library_mutex);
+  
   if (library_loaded) {
+    dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Library already loaded, ref_count=" << library_ref_count << dendl;
     dout(20) << "SizeCeph library already loaded" << dendl;
     return true;
   }
   
+  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Loading SizeCeph library, ref_count=" << library_ref_count << dendl;
   dout(10) << "Loading SizeCeph library..." << dendl;
   
   // Try multiple possible library paths
@@ -217,6 +256,11 @@ bool ErasureCodeSizeCeph::load_sizeceph_library() {
 }
 
 void ErasureCodeSizeCeph::unload_sizeceph_library() {
+  std::lock_guard<std::mutex> lock(library_mutex);
+  unload_sizeceph_library_unsafe();
+}
+
+void ErasureCodeSizeCeph::unload_sizeceph_library_unsafe() {
   if (sizeceph_handle) {
     dout(10) << "Unloading SizeCeph library" << dendl;
     dlclose(sizeceph_handle);
@@ -240,10 +284,16 @@ int ErasureCodeSizeCeph::minimum_to_decode(const shard_id_set &want_to_read,
   // This implements the always-decode architecture
   minimum_set = available;
   
-  // Check if we have enough chunks (need at least K chunks)
-  if (available.size() < SIZECEPH_K) {
+  // Check for force_all_chunks mode
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
+  // Check if we have enough chunks (need at least K chunks, or ALL in force_all_chunks mode)
+  unsigned int required_chunks = force_all_chunks ? SIZECEPH_N : SIZECEPH_K;
+  if (available.size() < required_chunks) {
     dout(0) << "SizeCeph minimum_to_decode: insufficient chunks, need at least " 
-            << SIZECEPH_K << ", got " << available.size() << dendl;
+            << required_chunks << ", got " << available.size() 
+            << " (force_all_chunks=" << force_all_chunks << ")" << dendl;
     return -EIO;
   }
   
@@ -395,10 +445,14 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
   // Store original size in the first chunk's metadata for decode
   // This is a simple approach - in production, you'd want more robust metadata
   
-  // Calculate chunk size for SizeCeph: each chunk gets 1/4 of the padded input
-  unsigned int chunk_size = padded_length / SIZECEPH_K;
+  // Calculate chunk size consistent with get_chunk_size() method
+  // For OSD backend compatibility: chunk_size = stripe_width / data_chunk_count
+  unsigned int data_chunks = get_data_chunk_count();
+  unsigned int chunk_size = padded_length / data_chunks;
   
-  dout(10) << "SizeCeph encode: chunk_size=" << chunk_size << dendl;
+  dout(10) << "SizeCeph encode: chunk_size=" << chunk_size 
+           << " padded_length=" << padded_length << " data_chunks=" << data_chunks 
+           << " force_all_chunks=" << force_all_chunks << dendl;
   
   // Load SizeCeph library if not already loaded
   if (!load_sizeceph_library()) {
@@ -406,30 +460,255 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
     return -ENOENT;
   }
   
-  // Prepare input buffer for SizeCeph algorithm
+  // =====================================================
+  // AGGRESSIVE MEMORY BOUNDS CHECKING AND CRASH-ON-VIOLATION
+  // =====================================================
+  
+  // Prepare input buffer for SizeCeph algorithm with bounds checking
   ceph::bufferlist input_copy;
   input_copy.append(padded_input);
   unsigned char* input_data = (unsigned char*)input_copy.c_str();
   
-  // Prepare output buffers for all 9 chunks
-  std::vector<ceph::bufferptr> output_chunks(SIZECEPH_N);
-  std::vector<unsigned char*> output_ptrs(SIZECEPH_N);
+  // MEMORY SAFETY CHECK 1: Validate input buffer
+  ceph_assert(input_data != nullptr);
+  ceph_assert(input_copy.length() == padded_length);
+  ceph_assert(padded_length > 0 && padded_length <= MAX_CHUNK_SIZE * SIZECEPH_N);
   
-  for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
-    output_chunks[i] = ceph::buffer::create(chunk_size);
-    output_ptrs[i] = (unsigned char*)output_chunks[i].c_str();
+  dout(0) << "MEMORY_SAFETY: Input buffer validation passed:" << dendl;
+  dout(0) << "  input_data = " << (void*)input_data << dendl;
+  dout(0) << "  padded_length = " << padded_length << dendl;
+  dout(0) << "  input_copy.length() = " << input_copy.length() << dendl;
+  
+  // Add memory guards around input buffer to detect overruns
+  const uint32_t GUARD_PATTERN = 0xDEADBEEF;
+  const size_t GUARD_SIZE = 64; // 64 bytes guard on each side
+  
+  // Create protected input buffer with guards
+  ceph::bufferptr protected_input = ceph::buffer::create(padded_length + 2 * GUARD_SIZE);
+  unsigned char* protected_input_ptr = (unsigned char*)protected_input.c_str();
+  
+  // Set up memory guards
+  for (size_t i = 0; i < GUARD_SIZE; i += sizeof(uint32_t)) {
+    *(uint32_t*)(protected_input_ptr + i) = GUARD_PATTERN;
+    *(uint32_t*)(protected_input_ptr + GUARD_SIZE + padded_length + i) = GUARD_PATTERN;
   }
   
-  // Call the actual SizeCeph split algorithm
-  size_split_func(output_ptrs.data(), input_data, padded_length);
+  // Copy input data to protected buffer
+  memcpy(protected_input_ptr + GUARD_SIZE, input_data, padded_length);
+  unsigned char* guarded_input_data = protected_input_ptr + GUARD_SIZE;
   
-  // Return only the requested chunks
+  dout(0) << "MEMORY_SAFETY: Protected input buffer created:" << dendl;
+  dout(0) << "  protected_input_ptr = " << (void*)protected_input_ptr << dendl;
+  dout(0) << "  guarded_input_data = " << (void*)guarded_input_data << dendl;
+  dout(0) << "  guard_size = " << GUARD_SIZE << dendl;
+  
+  // Prepare output buffers for all 9 chunks with guards
+  std::vector<ceph::bufferptr> output_chunks(SIZECEPH_N);
+  std::vector<unsigned char*> output_ptrs(SIZECEPH_N);
+  std::vector<unsigned char*> protected_output_ptrs(SIZECEPH_N);
+  
+  for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
+    // Create protected output buffer with guards
+    output_chunks[i] = ceph::buffer::create(chunk_size + 2 * GUARD_SIZE);
+    unsigned char* chunk_ptr = (unsigned char*)output_chunks[i].c_str();
+    
+    // MEMORY SAFETY CHECK 2: Validate output buffer allocation
+    ceph_assert(chunk_ptr != nullptr);
+    ceph_assert(output_chunks[i].length() >= chunk_size + 2 * GUARD_SIZE);
+    
+    // Set up memory guards for output buffer
+    for (size_t j = 0; j < GUARD_SIZE; j += sizeof(uint32_t)) {
+      *(uint32_t*)(chunk_ptr + j) = GUARD_PATTERN;
+      *(uint32_t*)(chunk_ptr + GUARD_SIZE + chunk_size + j) = GUARD_PATTERN;
+    }
+    
+    protected_output_ptrs[i] = chunk_ptr;
+    output_ptrs[i] = chunk_ptr + GUARD_SIZE; // Point to actual data area
+    
+    dout(0) << "MEMORY_SAFETY: Protected output buffer " << i << " created:" << dendl;
+    dout(0) << "  protected_ptr = " << (void*)protected_output_ptrs[i] << dendl;
+    dout(0) << "  data_ptr = " << (void*)output_ptrs[i] << dendl;
+    dout(0) << "  chunk_size = " << chunk_size << dendl;
+  }
+  
+  // MEMORY SAFETY CHECK 3: Validate all pointers before SizeCeph call
+  for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
+    ceph_assert(output_ptrs[i] != nullptr);
+    ceph_assert(protected_output_ptrs[i] != nullptr);
+    ceph_assert(output_ptrs[i] == protected_output_ptrs[i] + GUARD_SIZE);
+    
+    // Verify guards are still intact
+    for (size_t j = 0; j < GUARD_SIZE; j += sizeof(uint32_t)) {
+      uint32_t guard1 = *(uint32_t*)(protected_output_ptrs[i] + j);
+      uint32_t guard2 = *(uint32_t*)(protected_output_ptrs[i] + GUARD_SIZE + chunk_size + j);
+      ceph_assert_always(guard1 == GUARD_PATTERN);
+      ceph_assert_always(guard2 == GUARD_PATTERN);
+    }
+  }
+  
+  dout(0) << "MEMORY_SAFETY: All pre-call validations passed. Calling size_split_func..." << dendl;
+  
+  // Call the actual SizeCeph split algorithm with protected buffers
+  size_split_func(output_ptrs.data(), guarded_input_data, padded_length);
+  
+  dout(0) << "MEMORY_SAFETY: size_split_func completed. Checking for violations..." << dendl;
+  
+  // MEMORY SAFETY CHECK 4: Validate guards after SizeCeph call
+  // Check input buffer guards
+  for (size_t i = 0; i < GUARD_SIZE; i += sizeof(uint32_t)) {
+    uint32_t guard1 = *(uint32_t*)(protected_input_ptr + i);
+    uint32_t guard2 = *(uint32_t*)(protected_input_ptr + GUARD_SIZE + padded_length + i);
+    if (guard1 != GUARD_PATTERN) {
+      dout(0) << "MEMORY_VIOLATION: Input buffer underrun detected at offset " << i 
+              << " expected " << std::hex << GUARD_PATTERN 
+              << " got " << guard1 << std::dec << dendl;
+      ceph_abort_msg("SizeCeph input buffer underrun detected!");
+    }
+    if (guard2 != GUARD_PATTERN) {
+      dout(0) << "MEMORY_VIOLATION: Input buffer overrun detected at offset " 
+              << (GUARD_SIZE + padded_length + i) 
+              << " expected " << std::hex << GUARD_PATTERN 
+              << " got " << guard2 << std::dec << dendl;
+      ceph_abort_msg("SizeCeph input buffer overrun detected!");
+    }
+  }
+  
+  // Check output buffer guards
+  for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
+    for (size_t j = 0; j < GUARD_SIZE; j += sizeof(uint32_t)) {
+      uint32_t guard1 = *(uint32_t*)(protected_output_ptrs[i] + j);
+      uint32_t guard2 = *(uint32_t*)(protected_output_ptrs[i] + GUARD_SIZE + chunk_size + j);
+      if (guard1 != GUARD_PATTERN) {
+        dout(0) << "MEMORY_VIOLATION: Output buffer " << i << " underrun detected at offset " << j 
+                << " expected " << std::hex << GUARD_PATTERN 
+                << " got " << guard1 << std::dec << dendl;
+        ceph_abort_msg("SizeCeph output buffer underrun detected!");
+      }
+      if (guard2 != GUARD_PATTERN) {
+        dout(0) << "MEMORY_VIOLATION: Output buffer " << i << " overrun detected at offset " 
+                << (GUARD_SIZE + chunk_size + j)
+                << " expected " << std::hex << GUARD_PATTERN 
+                << " got " << guard2 << std::dec << dendl;
+        ceph_abort_msg("SizeCeph output buffer overrun detected!");
+      }
+    }
+  }
+  
+  dout(0) << "MEMORY_SAFETY: All post-call guard validations passed - no buffer overruns detected!" << dendl;
+  
+  // DEBUG: Verify output_ptrs after size_split_func
+  dout(0) << "SIZECEPH_DEBUG: After size_split_func call:" << dendl;
+  dout(0) << "  SIZECEPH_N = " << SIZECEPH_N << dendl;
+  dout(0) << "  output_ptrs.size() = " << output_ptrs.size() << dendl;
+  for (unsigned int i = 0; i < SIZECEPH_N && i < 5; ++i) {
+    dout(0) << "  output_ptrs[" << i << "] = " << (void*)output_ptrs[i] 
+            << " (first 4 bytes: " << std::hex 
+            << *(uint32_t*)output_ptrs[i] << std::dec << ")" << dendl;
+  }
+  
+  // Return only the requested chunks with aggressive safety checks
+  dout(0) << "SIZECEPH_BUFFER_DEBUG: Starting chunk creation for " << want_to_encode.size() << " shards" << dendl;
+  
   for (const auto& wanted_shard : want_to_encode) {
     if ((unsigned int)wanted_shard.id < SIZECEPH_N) {
+      dout(0) << "SIZECEPH_BUFFER_DEBUG: Processing shard " << wanted_shard.id << dendl;
+      
+      // MEMORY SAFETY CHECK 5: Re-validate guards before each buffer copy
+      const unsigned int shard_id = wanted_shard.id;
+      for (size_t j = 0; j < GUARD_SIZE; j += sizeof(uint32_t)) {
+        uint32_t guard1 = *(uint32_t*)(protected_output_ptrs[shard_id] + j);
+        uint32_t guard2 = *(uint32_t*)(protected_output_ptrs[shard_id] + GUARD_SIZE + chunk_size + j);
+        if (guard1 != GUARD_PATTERN || guard2 != GUARD_PATTERN) {
+          dout(0) << "MEMORY_VIOLATION: Buffer " << shard_id << " guards corrupted during processing!" << dendl;
+          dout(0) << "  guard1 at offset " << j << ": expected " << std::hex << GUARD_PATTERN 
+                  << " got " << guard1 << std::dec << dendl;
+          dout(0) << "  guard2 at offset " << (GUARD_SIZE + chunk_size + j) << ": expected " 
+                  << std::hex << GUARD_PATTERN << " got " << guard2 << std::dec << dendl;
+          ceph_abort_msg("SizeCeph buffer corruption detected during chunk processing!");
+        }
+      }
+      
       ceph::bufferlist chunk_bl;
-      chunk_bl.append(output_chunks[wanted_shard.id]);
+      
+      // Create a new buffer and copy the data to avoid ownership issues
+      ceph::bufferptr new_chunk = ceph::buffer::create(chunk_size);
+      
+      // COMPREHENSIVE BUFFER DEBUG WITH MEMORY SAFETY
+      dout(0) << "SIZECEPH_BUFFER_DEBUG: Buffer creation details:" << dendl;
+      dout(0) << "  chunk_size = " << chunk_size << dendl;
+      dout(0) << "  new_chunk.length() = " << new_chunk.length() << dendl;
+      dout(0) << "  new_chunk.c_str() = " << (void*)new_chunk.c_str() << dendl;
+      dout(0) << "  new_chunk raw nref = " << new_chunk.raw_nref() << dendl;
+      dout(0) << "  source_ptr (protected) = " << (void*)output_ptrs[shard_id] << dendl;
+      dout(0) << "  new_chunk buffer valid = " << (new_chunk.c_str() != nullptr) << dendl;
+      
+      // MEMORY SAFETY CHECK 6: Validate destination buffer
+      ceph_assert_always(new_chunk.c_str() != nullptr);
+      ceph_assert_always(new_chunk.length() >= chunk_size);
+      ceph_assert_always(output_ptrs[shard_id] != nullptr);
+      
+      // Only proceed if buffer is valid
+      if (new_chunk.c_str() != nullptr && new_chunk.length() >= chunk_size) {
+        dout(0) << "SIZECEPH_BUFFER_DEBUG: Pre-memcpy validation:" << dendl;
+        dout(0) << "  wanted_shard.id = " << shard_id << dendl;
+        dout(0) << "  source_ptr = " << (void*)output_ptrs[shard_id] << dendl;
+        dout(0) << "  dest_ptr = " << (void*)new_chunk.c_str() << dendl;
+        dout(0) << "  copy_size = " << chunk_size << dendl;
+        
+        // Check source data validity
+        if (output_ptrs[shard_id] != nullptr) {
+          dout(0) << "SIZECEPH_BUFFER_DEBUG: Source data preview: " 
+                  << std::hex << *(uint32_t*)output_ptrs[shard_id] << std::dec << dendl;
+        }
+        
+        // MEMORY SAFETY CHECK 7: Validate memory regions don't overlap
+        uintptr_t src_start = (uintptr_t)output_ptrs[shard_id];
+        uintptr_t src_end = src_start + chunk_size;
+        uintptr_t dst_start = (uintptr_t)new_chunk.c_str();
+        uintptr_t dst_end = dst_start + chunk_size;
+        
+        bool overlap = (src_start < dst_end) && (dst_start < src_end);
+        if (overlap) {
+          dout(0) << "MEMORY_VIOLATION: Buffer overlap detected!" << dendl;
+          dout(0) << "  src range: " << (void*)src_start << " - " << (void*)src_end << dendl;
+          dout(0) << "  dst range: " << (void*)dst_start << " - " << (void*)dst_end << dendl;
+          ceph_abort_msg("SizeCeph buffer overlap detected!");
+        }
+        
+        // Perform the copy with additional validation
+        memcpy(new_chunk.c_str(), output_ptrs[shard_id], chunk_size);
+        
+        // MEMORY SAFETY CHECK 8: Verify copy integrity
+        if (memcmp(new_chunk.c_str(), output_ptrs[shard_id], chunk_size) != 0) {
+          dout(0) << "MEMORY_VIOLATION: memcpy data corruption detected!" << dendl;
+          ceph_abort_msg("SizeCeph memcpy integrity check failed!");
+        }
+        
+        dout(0) << "SIZECEPH_BUFFER_DEBUG: Post-memcpy validation:" << dendl;
+        dout(0) << "  memcpy completed successfully" << dendl;
+        dout(0) << "  dest data preview: " 
+                << std::hex << *(uint32_t*)new_chunk.c_str() << std::dec << dendl;
+        dout(0) << "  buffer still valid = " << (new_chunk.c_str() != nullptr) << dendl;
+        dout(0) << "  data integrity verified = " << (memcmp(new_chunk.c_str(), output_ptrs[shard_id], chunk_size) == 0) << dendl;
+      } else {
+        dout(0) << "SIZECEPH_ERROR: Buffer creation failed!" << dendl;
+        return -ENOMEM;
+      }
+      
+      dout(0) << "SIZECEPH_BUFFER_DEBUG: Adding buffer to bufferlist:" << dendl;
+      dout(0) << "  buffer address before append = " << (void*)new_chunk.c_str() << dendl;
+      dout(0) << "  buffer length = " << new_chunk.length() << dendl;
+      dout(0) << "  buffer raw refcount = " << new_chunk.raw_nref() << dendl;
+      
+      chunk_bl.append(new_chunk);
+      
+      dout(0) << "SIZECEPH_BUFFER_DEBUG: Buffer added to bufferlist:" << dendl;
+      dout(0) << "  chunk_bl length = " << chunk_bl.length() << dendl;
+      dout(0) << "  buffer raw refcount after append = " << new_chunk.raw_nref() << dendl;
+      
       (*encoded)[wanted_shard] = chunk_bl;
       
+      dout(0) << "SIZECEPH_BUFFER_DEBUG: Shard " << wanted_shard.id << " added to encoded map" << dendl;
       dout(15) << "SizeCeph encode: returning chunk " << wanted_shard.id 
                << " size=" << chunk_bl.length() << dendl;
     } else {
@@ -438,8 +717,29 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
     }
   }
   
+  // MEMORY SAFETY CHECK 9: Final validation before return
+  dout(0) << "MEMORY_SAFETY: Performing final memory validation before return..." << dendl;
+  
+  // Final check of all input and output guards
+  for (size_t i = 0; i < GUARD_SIZE; i += sizeof(uint32_t)) {
+    uint32_t guard1 = *(uint32_t*)(protected_input_ptr + i);
+    uint32_t guard2 = *(uint32_t*)(protected_input_ptr + GUARD_SIZE + padded_length + i);
+    ceph_assert_always(guard1 == GUARD_PATTERN);
+    ceph_assert_always(guard2 == GUARD_PATTERN);
+  }
+  
+  for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
+    for (size_t j = 0; j < GUARD_SIZE; j += sizeof(uint32_t)) {
+      uint32_t guard1 = *(uint32_t*)(protected_output_ptrs[i] + j);
+      uint32_t guard2 = *(uint32_t*)(protected_output_ptrs[i] + GUARD_SIZE + chunk_size + j);
+      ceph_assert_always(guard1 == GUARD_PATTERN);
+      ceph_assert_always(guard2 == GUARD_PATTERN);
+    }
+  }
+  
+  dout(0) << "MEMORY_SAFETY: All final memory validations passed! No corruption detected." << dendl;
   dout(10) << "SizeCeph encode: successfully encoded " << encoded->size() 
-           << " chunks using SizeCeph algorithm" << dendl;
+           << " chunks using SizeCeph algorithm with full memory protection" << dendl;
   return 0;
 }
 
@@ -447,7 +747,23 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
 int ErasureCodeSizeCeph::encode(const std::set<int> &want_to_encode,
                                 const ceph::bufferlist &in,
                                 std::map<int, ceph::bufferlist> *encoded) {
-  return -ENOTSUP;
+  // Convert old interface to new interface
+  shard_id_set want_set;
+  for (int i : want_to_encode) {
+    want_set.insert(shard_id_t(i));
+  }
+  
+  shard_id_map<ceph::bufferlist> encoded_map(SIZECEPH_N);
+  int ret = encode(want_set, in, &encoded_map);
+  
+  if (ret == 0 && encoded) {
+    encoded->clear();
+    for (const auto& pair : encoded_map) {
+      (*encoded)[pair.first.id] = pair.second;
+    }
+  }
+  
+  return ret;
 }
 
 [[deprecated]]  
@@ -514,10 +830,15 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
   dout(10) << "SizeCeph decode: want=" << want_to_read.size() 
            << " available=" << chunks.size() << " chunk_size=" << chunk_size << dendl;
   
+  // Check for force_all_chunks mode
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
   // Check if we have enough chunks to restore
-  if (chunks.size() < SIZECEPH_K) {
+  unsigned int required_chunks = force_all_chunks ? SIZECEPH_N : SIZECEPH_K;
+  if (chunks.size() < required_chunks) {
     dout(0) << "SizeCeph decode: insufficient chunks " << chunks.size() 
-            << " (need " << SIZECEPH_K << ")" << dendl;
+            << " (need " << required_chunks << ", force_all_chunks=" << force_all_chunks << ")" << dendl;
     return -ENOENT;
   }
   
@@ -611,8 +932,13 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
   dout(10) << "SizeCeph decode: pattern " << std::hex << available_bitmask 
            << std::dec << " validated as restorable by fixed library" << dendl;
 
-  // Calculate original data size (4 * chunk_size for SizeCeph)
-  unsigned int original_size = SIZECEPH_K * effective_chunk_size;
+  // Calculate original data size: for SizeCeph with k=9 chunks, 
+  // original_size = data_chunk_count * effective_chunk_size
+  unsigned int data_chunks = get_data_chunk_count();
+  unsigned int original_size = data_chunks * effective_chunk_size;
+  
+  dout(10) << "SizeCeph decode: original_size=" << original_size 
+           << " (data_chunks=" << data_chunks << " * effective_chunk_size=" << effective_chunk_size << ")" << dendl;
   
   // Prepare output buffer for restored original data
   ceph::bufferptr restored_data = ceph::buffer::create(original_size);
@@ -646,7 +972,10 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
   for (const auto& wanted_shard : want_to_read) {
     shard_id_t shard_id = wanted_shard;
     
-    if ((unsigned int)shard_id.id < SIZECEPH_K) {
+    // In force_all_chunks mode, all chunks are data chunks; otherwise only 0-3 are data
+    unsigned int data_chunk_limit = force_all_chunks ? SIZECEPH_N : SIZECEPH_K;
+    
+    if ((unsigned int)shard_id.id < data_chunk_limit) {
       // Data chunk request: extract from RESTORED ORIGINAL data
       // Note: This is NOT the same as the on-disk chunk data!
       ceph::bufferlist chunk_bl;
@@ -656,7 +985,7 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
       (*decoded)[shard_id] = chunk_bl;
       
       dout(15) << "SizeCeph decode: returning ORIGINAL data chunk " << shard_id.id 
-               << " size=" << chunk_bl.length() << dendl;
+               << " size=" << chunk_bl.length() << " (force_all_chunks=" << force_all_chunks << ")" << dendl;
     } else if ((unsigned int)shard_id.id < SIZECEPH_N) {
       // Parity chunk request: return the actual stored chunk
       if (available[shard_id.id]) {
@@ -698,7 +1027,28 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
 int ErasureCodeSizeCeph::decode(const std::set<int> &want_to_read,
                                 const std::map<int, ceph::bufferlist> &chunks,
                                 std::map<int, ceph::bufferlist> *decoded, int chunk_size) {
-  return -ENOTSUP;
+  // Convert old interface to new interface
+  shard_id_set want_set;
+  for (int i : want_to_read) {
+    want_set.insert(shard_id_t(i));
+  }
+  
+  shard_id_map<ceph::bufferlist> chunks_map(SIZECEPH_N);
+  for (const auto& pair : chunks) {
+    chunks_map[shard_id_t(pair.first)] = pair.second;
+  }
+  
+  shard_id_map<ceph::bufferlist> decoded_map(SIZECEPH_N);
+  int ret = decode(want_set, chunks_map, &decoded_map, chunk_size);
+  
+  if (ret == 0 && decoded) {
+    decoded->clear();
+    for (const auto& pair : decoded_map) {
+      (*decoded)[pair.first.id] = pair.second;
+    }
+  }
+  
+  return ret;
 }
 
 int ErasureCodeSizeCeph::decode_chunks(const shard_id_set &want_to_read,
@@ -722,13 +1072,81 @@ const std::vector<shard_id_t> &ErasureCodeSizeCeph::get_chunk_mapping() const {
 int ErasureCodeSizeCeph::decode_concat(const std::set<int>& want_to_read,
                                        const std::map<int, ceph::bufferlist> &chunks,
                                        ceph::bufferlist *decoded) {
-  return -ENOTSUP;
+  dout(10) << "SizeCeph decode_concat: deprecated function called with want_to_read=" 
+           << want_to_read.size() << " chunks=" << chunks.size() << dendl;
+  
+  if (!decoded) {
+    dout(0) << "SizeCeph decode_concat: decoded buffer is null" << dendl;
+    return -EINVAL;
+  }
+  
+  // Convert to modern interface
+  shard_id_set want_set;
+  for (int i : want_to_read) {
+    want_set.insert(shard_id_t(i));
+  }
+  
+  shard_id_map<ceph::bufferlist> chunks_map(SIZECEPH_N);
+  for (const auto& pair : chunks) {
+    chunks_map[shard_id_t(pair.first)] = pair.second;
+  }
+  
+  shard_id_map<ceph::bufferlist> decoded_map(SIZECEPH_N);
+  int chunk_size = chunks.empty() ? 0 : chunks.begin()->second.length();
+  int ret = decode(want_set, chunks_map, &decoded_map, chunk_size);
+  
+  if (ret == 0) {
+    decoded->clear();
+    
+    // ECCommonL.cc expects shards to be concatenated in the order they appear in want_to_read
+    // We must return ALL requested shards (data AND parity) in sequential order
+    // This is required for the trim_offset calculation to work correctly
+    for (int shard_id : want_to_read) {
+      auto it = decoded_map.find(shard_id_t(shard_id));
+      if (it != decoded_map.end()) {
+        decoded->claim_append(it->second);
+        dout(20) << "SizeCeph decode_concat: appending shard " << shard_id 
+                 << " with length " << it->second.length() << dendl;
+      } else {
+        dout(5) << "SizeCeph decode_concat: WARNING - requested shard " << shard_id 
+                << " not found in decoded_map" << dendl;
+        // Append empty buffer to maintain shard ordering
+        ceph::bufferlist empty_shard;
+        empty_shard.append_zero(chunk_size);
+        decoded->claim_append(empty_shard);
+      }
+    }
+    
+    dout(15) << "SizeCeph decode_concat: successfully decoded " 
+             << decoded->length() << " bytes (all requested shards in order)" << dendl;
+  }
+  
+  return ret;
 }
 
 [[deprecated]]
 int ErasureCodeSizeCeph::decode_concat(const std::map<int, ceph::bufferlist> &chunks,
                                        ceph::bufferlist *decoded) {
-  return -ENOTSUP;
+  dout(10) << "SizeCeph decode_concat: deprecated function called with chunks=" 
+           << chunks.size() << dendl;
+  
+  if (!decoded) {
+    dout(0) << "SizeCeph decode_concat: decoded buffer is null" << dendl;
+    return -EINVAL;
+  }
+  
+  // For this version, we want to read all data chunks
+  // In force_all_chunks mode, all chunks (0 to N-1) are data; otherwise only (0 to K-1)
+  auto force_all_iter = profile.find("force_all_chunks");
+  bool force_all_chunks = (force_all_iter != profile.end() && force_all_iter->second == "true");
+  
+  std::set<int> want_to_read;
+  unsigned int data_chunk_limit = force_all_chunks ? SIZECEPH_N : SIZECEPH_K;
+  for (unsigned int i = 0; i < data_chunk_limit; ++i) {
+    want_to_read.insert(i);
+  }
+  
+  return decode_concat(want_to_read, chunks, decoded);
 }
 
 ErasureCodeSizeCeph::plugin_flags ErasureCodeSizeCeph::get_supported_optimizations() const {

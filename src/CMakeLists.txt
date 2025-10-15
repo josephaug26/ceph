@@ -659,6 +659,8 @@ if(ENABLE_COVERAGE)
 endif(ENABLE_COVERAGE)
 
 target_link_libraries(ceph-common legacy-option-headers)
+# Add missing system libraries for linking
+target_link_libraries(ceph-common nghttp2 ssh ldap rtmp brotlidec zstd gssapi_krb5 idn2 psl ssl crypto)
 
 if(WITH_JAEGER)
 add_dependencies(ceph-common jaeger_base)
@@ -782,7 +784,8 @@ target_link_libraries(ceph-mon mon os global-static ceph-common
   ${ALLOC_LIBS}
   ${EXTRALIBS}
   ${CMAKE_DL_LIBS}
-  ${GSSAPI_LIBRARIES})
+  ${GSSAPI_LIBRARIES}
+  ssl crypto)
 install(TARGETS ceph-mon DESTINATION bin)
 
 # OSD/ObjectStore
@@ -811,7 +814,8 @@ add_executable(ceph-osd ${ceph_osd_srcs})
 add_dependencies(ceph-osd erasure_code_plugins extblkdev_plugins)
 target_link_libraries(ceph-osd osd os global-static common
   ${ALLOC_LIBS}
-  ${BLKID_LIBRARIES})
+  ${BLKID_LIBRARIES}
+  ssl crypto)
 if(WITH_FUSE)
   target_link_libraries(ceph-osd FUSE::FUSE)
 endif()

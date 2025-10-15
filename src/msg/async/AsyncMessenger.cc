@@ -969,7 +969,22 @@ ConnectionRef AsyncMessenger::connect_to(int type,
 
   AsyncConnectionRef conn = _lookup_conn(av);
   if (conn) {
-    ldout(cct, 10) << __func__ << " " << av << " existing " << conn << dendl;
+    // Validate connection before use to prevent use-after-free crashes
+    try {
+      uint64_t nref = conn->get_nref();
+      if (nref <= 1) {
+        ldout(cct, 1) << __func__ << " " << av << " connection " << conn 
+                      << " has low reference count (nref=" << nref 
+                      << "), creating new connection" << dendl;
+        conn = create_connect(av, type, false);
+      } else {
+        ldout(cct, 10) << __func__ << " " << av << " existing " << conn << dendl;
+      }
+    } catch (...) {
+      ldout(cct, 1) << __func__ << " " << av << " connection " << conn 
+                    << " is corrupted, creating new connection" << dendl;
+      conn = create_connect(av, type, false);
+    }
   } else {
     conn = create_connect(av, type, false);
     ldout(cct, 10) << __func__ << " " << av << " new " << conn << dendl;

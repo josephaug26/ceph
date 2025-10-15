@@ -7800,9 +7800,31 @@ int OSDMonitor::prepare_pool_size(const unsigned pool_type,
       err = get_erasure_code(erasure_code_profile, &erasure_code, ss);
       if (err == 0) {
 	*size = erasure_code->get_chunk_count();
-	*min_size =
-	  erasure_code->get_data_chunk_count() +
-	  std::min<int>(1, erasure_code->get_coding_chunk_count() - 1);
+	
+	// Check for SizeCeph plugin with force_all_chunks mode
+	// SizeCeph with force_all_chunks=true has coding_chunk_count=0, which breaks
+	// the normal min_size calculation. In this mode, all chunks are data chunks
+	// and the algorithm requires all chunks for reconstruction.
+	ErasureCodeProfile profile = osdmap.get_erasure_code_profile(erasure_code_profile);
+	auto plugin_it = profile.find("plugin");
+	auto force_all_it = profile.find("force_all_chunks");
+	
+	bool is_sizeceph_force_all = (plugin_it != profile.end() && 
+				      plugin_it->second == "sizeceph" &&
+				      force_all_it != profile.end() &&
+				      force_all_it->second == "true");
+	
+	if (is_sizeceph_force_all && erasure_code->get_coding_chunk_count() == 0) {
+	  // Special case for SizeCeph force_all_chunks mode:
+	  // All chunks are data chunks, requires all for reconstruction
+	  *min_size = erasure_code->get_data_chunk_count();
+	} else {
+	  // Normal erasure coding min_size calculation
+	  *min_size =
+	    erasure_code->get_data_chunk_count() +
+	    std::min<int>(1, erasure_code->get_coding_chunk_count() - 1);
+	}
+	
 	ceph_assert(*min_size <= *size);
 	ceph_assert(*min_size >= erasure_code->get_data_chunk_count());
       }

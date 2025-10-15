@@ -7,6 +7,7 @@
 
 #include "erasure-code/ErasureCodeInterface.h"
 #include "osd/osd_types.h"
+#include <mutex>
 
 class ErasureCodeSizeCeph : public ceph::ErasureCodeInterface {
 public:
@@ -114,6 +115,8 @@ private:
   // SizeCeph library interface
   static void* sizeceph_handle;
   static bool library_loaded;
+  static int library_ref_count;
+  static std::mutex library_mutex;
   
   typedef void (*size_split_fn_t)(unsigned char **pp_dst, unsigned char *p_src, unsigned int len);
   typedef int (*size_restore_fn_t)(unsigned char *p_dst, const unsigned char **pp_src, unsigned int len);
@@ -125,6 +128,7 @@ private:
   
   bool load_sizeceph_library();
   void unload_sizeceph_library();
+  void unload_sizeceph_library_unsafe(); // Internal version without mutex
   
   // Helper methods
   int calculate_aligned_size(int original_size) const;

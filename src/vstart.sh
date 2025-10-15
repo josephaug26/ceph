@@ -1447,12 +1447,16 @@ EOF
             done
             DASHBOARD_ADMIN_SECRET_FILE="${CEPH_CONF_PATH}/dashboard-admin-secret.txt"
             printf 'admin' > "${DASHBOARD_ADMIN_SECRET_FILE}"
-            ceph_adm dashboard ac-user-create admin -i "${DASHBOARD_ADMIN_SECRET_FILE}" \
-                administrator --force-password
-            if [ "$ssl" != "0" ]; then
-                if ! ceph_adm dashboard create-self-signed-cert;  then
-                    debug echo dashboard module not working correctly!
+            if ceph_adm dashboard ac-user-create admin -i "${DASHBOARD_ADMIN_SECRET_FILE}" \
+                administrator --force-password; then
+                debug echo "Dashboard admin user created successfully"
+                if [ "$ssl" != "0" ]; then
+                    if ! ceph_adm dashboard create-self-signed-cert;  then
+                        debug echo dashboard module not working correctly!
+                    fi
                 fi
+            else
+                debug echo "Dashboard setup failed (missing frontend assets), continuing without dashboard..."
             fi
 
             ceph_adm osd pool create rbd
