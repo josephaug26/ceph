@@ -529,12 +529,13 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
   unsigned int input_length = in.length();
   unsigned int chunk_size = input_length / SIZECEPH_ALGORITHM_ALIGNMENT;  // SizeCeph produces input_length/4 per chunk
   
-  // Prepare output buffers
+  // Buffer allocation - OSD provides empty shard_id_map, plugin allocates actual buffers
+  // Use SIMD-aligned allocation for optimal performance (consistent with ErasureCode.cc)
   std::vector<unsigned char*> output_ptrs(SIZECEPH_N);
   
   for (const auto& wanted_shard : want_to_encode) {
-    (*encoded)[wanted_shard] = ceph::bufferlist();
-    ceph::bufferptr chunk_buffer = ceph::buffer::create(chunk_size);
+    // Allocate SIMD-aligned buffer for optimal vectorized operations (SIMD_ALIGN = 64)
+    ceph::bufferptr chunk_buffer = ceph::buffer::create_aligned(chunk_size, 64);
     output_ptrs[wanted_shard.id] = (unsigned char*)chunk_buffer.c_str();
     (*encoded)[wanted_shard].append(chunk_buffer);
   }
@@ -683,12 +684,13 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
     return -ENOTSUP;
   }
   
-  // Execute restore
-  unsigned int original_size = get_data_chunk_count() * effective_chunk_size;
-  ceph::bufferptr restored_data = ceph::buffer::create(original_size);
+  // Execute restore - size_restore reconstructs the ORIGINAL data that was encoded
+  // NOT 9 chunks worth, but the actual original data size before encoding
+  unsigned int original_data_size = SIZECEPH_ALGORITHM_ALIGNMENT * effective_chunk_size;  // size_split input size
+  ceph::bufferptr restored_data = ceph::buffer::create(original_data_size);
   unsigned char* output_ptr = (unsigned char*)restored_data.c_str();
   
-  int restore_result = size_restore_func(output_ptr, const_input_chunks.data(), original_size);
+  int restore_result = size_restore_func(output_ptr, const_input_chunks.data(), original_data_size);
   if (restore_result != 0) {
     dout(0) << "SizeCeph decode: restore failed with code " << restore_result << dendl;
     return -EIO;
