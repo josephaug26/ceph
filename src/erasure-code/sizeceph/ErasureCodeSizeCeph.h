@@ -108,7 +108,6 @@ private:
   static const unsigned int SIZECEPH_M = 5;    // Parity chunks  
   static const unsigned int SIZECEPH_N = 9;    // Total chunks (K+M)
   static const unsigned int SIZECEPH_ALGORITHM_ALIGNMENT = 4;    // SizeCeph processes 4 bytes at a time
-  static const unsigned int SIZECEPH_MIN_BLOCK_SIZE = 512;       // Storage block alignment
   
   ceph::ErasureCodeProfile profile;
   std::vector<shard_id_t> chunk_mapping;
@@ -132,6 +131,7 @@ private:
   void unload_sizeceph_library_unsafe(); // Internal version without mutex
   
   // Helper methods
+  unsigned get_alignment() const;
   int calculate_aligned_size(int original_size) const;
   void interleave_data(const char *src, char **dst_chunks, int chunk_size, int num_chunks) const;
   void deinterleave_data(char **src_chunks, char *dst, int chunk_size, int num_chunks) const;

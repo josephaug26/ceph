@@ -300,6 +300,12 @@ int ECCommonL::ReadPipeline::get_min_avail_to_read_shards(
 
   map<int, vector<pair<int, int>>> need;
   int r = ec_impl->minimum_to_decode(want, have, &need);
+  size_t count = need.size();
+  dout(10) << __func__ << ": need " << need << dendl;
+  dout(10) << __func__ << ": count " << count << dendl;
+  for (auto &&i: need) {
+    dout(10) << __func__ << ": need shard " << i.first << " subchunks " << i.second << dendl;
+  }
   if (r < 0)
     return r;
 
@@ -613,12 +619,25 @@ struct ClientReadCompleter : ECCommonL::ReadCompleter {
                << " wanted_to_read=" << wanted_to_read
                << " to_decode=" << to_decode
                << dendl;
+      
+      // DEBUG: Log SizeCeph decode input details
+      dout(1) << __func__ << " SizeCeph DEBUG: wanted_to_read.size()=" << wanted_to_read.size() 
+              << " to_decode.size()=" << to_decode.size() << dendl;
+      for (const auto& [shard, buf] : to_decode) {
+        dout(1) << __func__ << " SizeCeph DEBUG: shard=" << shard 
+                << " buf.length()=" << buf.length() << dendl;
+      }
+      
       int r = ECUtilL::decode(
 	read_pipeline.sinfo,
 	read_pipeline.ec_impl,
 	wanted_to_read,
 	to_decode,
 	&bl);
+      
+      // DEBUG: Log SizeCeph decode output details  
+      dout(1) << __func__ << " SizeCeph DEBUG: decode result r=" << r
+              << " bl.length()=" << bl.length() << dendl;
       if (r < 0) {
         dout(10) << __func__ << " error on ECUtilL::decode r=" << r << dendl;
         res.r = r;
@@ -689,17 +708,35 @@ void ECCommonL::ReadPipeline::objects_read_and_reconstruct(
   map<hobject_t, read_request_t> for_read_op;
   for (auto &&to_read: reads) {
     set<int> want_to_read;
-    if (cct->_conf->bluestore_debug_inject_read_err &&
-        ECInject::test_parity_read(to_read.first)) {
-      get_want_to_read_all_shards(&want_to_read);
-    } else if (cct->_conf->osd_ec_partial_reads) {
-      for (const auto& single_region : to_read.second) {
-        get_min_want_to_read_shards(single_region.offset,
-				    single_region.size,
-				    &want_to_read);
+    // Special-case: if this pool/profile is using SizeCeph, we must read all k+m shards 
+    // because the SizeCeph plugin requires all physical chunks to decode.
+    // This ensures minimum_to_decode() gets all the chunks it needs.
+    try {
+      const std::string &profile_name = get_parent()->get_pool().erasure_code_profile;
+      const auto &profile = get_osdmap()->get_erasure_code_profile(profile_name);
+      auto plugin_it = profile.find("plugin");
+      bool is_sizeceph = (plugin_it != profile.end() && plugin_it->second == "sizeceph");
+
+      if (is_sizeceph) {
+        // SizeCeph always needs all shards for decode - let minimum_to_decode handle the logic
+        get_want_to_read_all_shards(&want_to_read);
+      } else if (cct->_conf->bluestore_debug_inject_read_err &&
+                 ECInject::test_parity_read(to_read.first)) {
+        get_want_to_read_all_shards(&want_to_read);
+      } else if (cct->_conf->osd_ec_partial_reads) {
+        for (const auto& single_region : to_read.second) {
+          get_min_want_to_read_shards(single_region.offset,
+                                      single_region.size,
+                                      &want_to_read);
+        }
+      } else {
+        get_want_to_read_shards(&want_to_read);
       }
-    } else {
-      get_want_to_read_shards(&want_to_read);
+    } catch (...) {
+      // If any failure occurs retrieving profile, fall back to conservative approach
+      // for unknown plugins - read all shards to be safe
+      dout(5) << __func__ << ": Failed to get erasure code profile, defaulting to read all shards" << dendl;
+      get_want_to_read_all_shards(&want_to_read);
     }
     map<pg_shard_t, vector<pair<int, int>>> shards;
     int r = get_min_avail_to_read_shards(

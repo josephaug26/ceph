@@ -687,6 +687,12 @@ void ECCommon::ReadPipeline::objects_read_and_reconstruct(
         ECInject::test_parity_read(hoid)) {
       get_want_to_read_all_shards(to_read, want_shard_reads);
     }
+    // Special case for SizeCeph: detect if this is K=4,M=5 SizeCeph (chunk_count=9, data_chunks=4)
+    // and force reading all chunks since SizeCeph requires all 9 chunks for decode
+    else if (ec_impl->get_chunk_count() == 9 && ec_impl->get_data_chunk_count() == 4) {
+      dout(10) << __func__ << " detected SizeCeph K=4,M=5 - forcing read of all chunks" << dendl;
+      get_want_to_read_all_shards(to_read, want_shard_reads);
+    }
     else {
       get_want_to_read_shards(to_read, want_shard_reads);
     }

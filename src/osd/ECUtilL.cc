@@ -52,9 +52,15 @@ namespace ECLegacy {
         chunks[j->first].substr_of(j->second, i, sinfo.get_chunk_size());
            }
       bufferlist bl;
+      // Debug: log decode_concat input/output
+      printf("ECUtilL::decode: want_to_read.size=%zu chunks.size=%zu\n", want_to_read.size(), chunks.size());
+      for (auto &p : chunks) {
+        printf("  chunk[%d] length=%u\n", p.first, (unsigned)p.second.length());
+      }
 IGNORE_DEPRECATED
       int r = ec_impl->decode_concat(want_to_read, chunks, &bl);
 END_IGNORE_DEPRECATED
+      printf("ECUtilL::decode: decode_concat returned r=%d bl.length=%u\n", r, (unsigned)bl.length());
       ceph_assert(r == 0);
       ceph_assert(bl.length() % sinfo.get_chunk_size() == 0);
       out->claim_append(bl);
