@@ -85,14 +85,9 @@ ErasureCodeSizeCeph::size_restore_fn_t ErasureCodeSizeCeph::size_restore_func = 
 ErasureCodeSizeCeph::size_can_get_restore_fn_t ErasureCodeSizeCeph::size_can_get_restore_func = nullptr;
 
 ErasureCodeSizeCeph::ErasureCodeSizeCeph() {
-  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Constructor called" << dendl;
-  dout(10) << "ErasureCodeSizeCeph constructor: direct ErasureCodeInterface implementation" << dendl;
-  
   // Thread-safe reference counting for library management
   std::lock_guard<std::mutex> lock(library_mutex);
   library_ref_count++;
-  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Instance created, ref_count=" << library_ref_count 
-          << " library_loaded=" << library_loaded << dendl;
   
   // Initialize default profile
   profile["k"] = std::to_string(SIZECEPH_K);
@@ -107,27 +102,18 @@ ErasureCodeSizeCeph::ErasureCodeSizeCeph() {
 }
 
 ErasureCodeSizeCeph::~ErasureCodeSizeCeph() {
-  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Destructor called" << dendl;
-  dout(10) << "ErasureCodeSizeCeph destructor" << dendl;
-  
   // Thread-safe reference counting for library management
   std::lock_guard<std::mutex> lock(library_mutex);
   library_ref_count--;
-  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Instance destroyed, ref_count=" << library_ref_count 
-          << " library_loaded=" << library_loaded << dendl;
   
   // Only unload library when no instances remain
   if (library_ref_count <= 0) {
-    dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Last instance - calling unload_sizeceph_library_unsafe" << dendl;
-    dout(10) << "Last SizeCeph instance - unloading library" << dendl;
     unload_sizeceph_library_unsafe();
     library_ref_count = 0; // Ensure it doesn't go negative
   }
 }
 
 int ErasureCodeSizeCeph::init(ceph::ErasureCodeProfile &profile_arg, std::ostream *ss) {
-  dout(10) << "SizeCeph init: k=" << SIZECEPH_K << " m=" << SIZECEPH_M << " direct implementation" << dendl;
-  
   // Merge provided profile with defaults
   profile = profile_arg;
   
@@ -144,7 +130,6 @@ int ErasureCodeSizeCeph::init(ceph::ErasureCodeProfile &profile_arg, std::ostrea
     //  - legacy all-as-data mode: k=9, m=0
     //  - advertised K/M for pool creation (k=4,m=5) while plugin still
     //    requires all 9 chunks at runtime (force_all_chunks=true)
-    dout(10) << "SizeCeph force_all_chunks mode enabled" << dendl;
     if (k_iter != profile.end() && m_iter != profile.end()) {
       int k_val = std::stoi(k_iter->second);
       int m_val = std::stoi(m_iter->second);
@@ -173,7 +158,6 @@ int ErasureCodeSizeCeph::init(ceph::ErasureCodeProfile &profile_arg, std::ostrea
     return -ENOENT;
   }
   
-  dout(10) << "SizeCeph initialized successfully with always-decode architecture" << dendl;
   return 0;
 }
 
@@ -182,10 +166,7 @@ const ceph::ErasureCodeProfile &ErasureCodeSizeCeph::get_profile() const {
 }
 
 int ErasureCodeSizeCeph::create_rule(const std::string &name, CrushWrapper &crush, std::ostream *ss) const {
-  dout(10) << "SizeCeph create_rule: " << name << dendl;
-  
   if (crush.rule_exists(name)) {
-    dout(10) << "Rule " << name << " already exists" << dendl;
     return crush.get_rule_id(name);
   }
   
@@ -198,7 +179,6 @@ int ErasureCodeSizeCeph::create_rule(const std::string &name, CrushWrapper &crus
     return ruleid;
   }
   
-  dout(10) << "Created crush rule " << name << " with id " << ruleid << dendl;
   return ruleid;
 }
 
@@ -262,10 +242,6 @@ unsigned int ErasureCodeSizeCeph::get_chunk_size(unsigned int stripe_width) cons
   unsigned padded_length = round_up_to(stripe_width, k_alignment);
   unsigned chunk_size = padded_length / SIZECEPH_K;
   
-  dout(15) << "SizeCeph get_chunk_size: stripe_width=" << stripe_width 
-           << " k_alignment=" << k_alignment << " padded=" << padded_length 
-           << " chunk_size=" << chunk_size << dendl;
-  
   return chunk_size;
 }
 
@@ -273,8 +249,6 @@ int ErasureCodeSizeCeph::calculate_aligned_size(int original_size) const {
   // Align to algorithm boundary for SizeCeph (4-byte alignment only)
   int aligned_to_algorithm = round_up_to(original_size, get_alignment());
   
-  dout(15) << "SizeCeph calculate_aligned_size: original=" << original_size 
-           << " aligned=" << aligned_to_algorithm << dendl;
   return aligned_to_algorithm;
 }
 
@@ -282,13 +256,8 @@ bool ErasureCodeSizeCeph::load_sizeceph_library() {
   std::lock_guard<std::mutex> lock(library_mutex);
   
   if (library_loaded) {
-    dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Library already loaded, ref_count=" << library_ref_count << dendl;
-    dout(20) << "SizeCeph library already loaded" << dendl;
     return true;
   }
-  
-  dout(0) << "SIZECEPH_REFCOUNT_DEBUG: Loading SizeCeph library, ref_count=" << library_ref_count << dendl;
-  dout(10) << "Loading SizeCeph library..." << dendl;
   
   // Try multiple possible library paths
   std::vector<std::string> lib_paths = {
@@ -301,35 +270,25 @@ bool ErasureCodeSizeCeph::load_sizeceph_library() {
   for (const auto& path : lib_paths) {
     sizeceph_handle = dlopen(path.c_str(), RTLD_LAZY);
     if (sizeceph_handle) {
-      dout(10) << "SizeCeph library loaded from: " << path << dendl;
       break;
-    } else {
-      dout(20) << "Failed to load from " << path << ": " << dlerror() << dendl;
     }
   }
   
   if (!sizeceph_handle) {
-    dout(0) << "Cannot load sizeceph library from any location: " << dlerror() << dendl;
     return false;
   }
   
   // Load function symbols
-  dout(10) << "Loading SizeCeph function symbols..." << dendl;
   size_split_func = (size_split_fn_t) dlsym(sizeceph_handle, "size_split");
   size_restore_func = (size_restore_fn_t) dlsym(sizeceph_handle, "size_restore");
   size_can_get_restore_func = (size_can_get_restore_fn_t) dlsym(sizeceph_handle, "size_can_get_restore_fn");
   
   if (!size_split_func || !size_restore_func || !size_can_get_restore_func) {
-    dout(0) << "Cannot load sizeceph functions: " << dlerror() << dendl;
-    dout(0) << "size_split_func: " << (void*)size_split_func << dendl;
-    dout(0) << "size_restore_func: " << (void*)size_restore_func << dendl;
-    dout(0) << "size_can_get_restore_func: " << (void*)size_can_get_restore_func << dendl;
     dlclose(sizeceph_handle);
     sizeceph_handle = nullptr;
     return false;
   }
   
-  dout(10) << "SizeCeph library functions loaded successfully" << dendl;
   library_loaded = true;
   return true;
 }
@@ -341,14 +300,12 @@ void ErasureCodeSizeCeph::unload_sizeceph_library() {
 
 void ErasureCodeSizeCeph::unload_sizeceph_library_unsafe() {
   if (sizeceph_handle) {
-    dout(10) << "Unloading SizeCeph library" << dendl;
     dlclose(sizeceph_handle);
     sizeceph_handle = nullptr;
     library_loaded = false;
     size_split_func = nullptr;
     size_restore_func = nullptr;
     size_can_get_restore_func = nullptr;
-    dout(10) << "SizeCeph library unloaded" << dendl;
   }
 }
 
@@ -357,16 +314,12 @@ int ErasureCodeSizeCeph::minimum_to_decode(const shard_id_set &want_to_read,
                                            const shard_id_set &available,
                                            shard_id_set &minimum_set,
                                            mini_flat_map<shard_id_t, std::vector<std::pair<int, int>>> *minimum_sub_chunks) {
-  dout(15) << "SizeCeph minimum_to_decode: ABSOLUTE REQUIREMENT for all 9 chunks" << dendl;
   
   // CRITICAL: SizeCeph algorithm has ABSOLUTE requirement for ALL 9 chunks
   // This is not negotiable - the algorithm cannot function with missing chunks
   
   // Check if we have ALL required chunks (all 9, chunks 0-8)
   if (available.size() < SIZECEPH_N) {
-    dout(0) << "SizeCeph minimum_to_decode: ABSOLUTE REQUIREMENT FAILED - need ALL " 
-            << SIZECEPH_N << " chunks, got only " << available.size() 
-            << " (SizeCeph algorithm cannot function with missing chunks)" << dendl;
     return -EIO;
   }
   
@@ -374,8 +327,6 @@ int ErasureCodeSizeCeph::minimum_to_decode(const shard_id_set &want_to_read,
   for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
     shard_id_t expected_shard(i);
     if (available.find(expected_shard) == available.end()) {
-      dout(0) << "SizeCeph minimum_to_decode: missing required chunk " << i 
-              << " (ALL 9 chunks required for SizeCeph algorithm)" << dendl;
       return -EIO;
     }
   }
@@ -388,7 +339,6 @@ int ErasureCodeSizeCeph::minimum_to_decode(const shard_id_set &want_to_read,
     minimum_sub_chunks->clear();
   }
   
-  dout(15) << "SizeCeph minimum_to_decode: returning all " << minimum_set.size() << " chunks (required)" << dendl;
   return 0;
 }
 
@@ -420,7 +370,6 @@ int ErasureCodeSizeCeph::minimum_to_decode(const std::set<int> &want_to_read,
 int ErasureCodeSizeCeph::minimum_to_decode_with_cost(const shard_id_set &want_to_read,
                                                      const shard_id_map<int> &available,
                                                      shard_id_set *minimum) {
-  dout(15) << "SizeCeph minimum_to_decode_with_cost: always-decode ignores costs" << dendl;
   
   // Extract available chunks
   shard_id_set available_set;
@@ -475,28 +424,23 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
   
   // Load SizeCeph library first
   if (!load_sizeceph_library()) {
-    dout(0) << "SizeCeph encode: failed to load SizeCeph library" << dendl;
     return -ENOENT;
   }
   
   // Validate all 9 chunks are requested (SizeCeph requires all chunks for algorithm)
   if (want_to_encode.size() != SIZECEPH_N) {
-    dout(0) << "SizeCeph encode: requires all " << SIZECEPH_N 
-            << " chunks, got " << want_to_encode.size() << dendl;
     return -EINVAL;
   }
   
   // Validate chunk IDs are 0-8
   for (const auto& shard : want_to_encode) {
     if (shard.id < 0 || shard.id >= (int)SIZECEPH_N) {
-      dout(0) << "SizeCeph encode: invalid chunk ID " << shard.id << dendl;
       return -EINVAL;
     }
   }
   
   // Handle empty input
   if (in.length() == 0) {
-    dout(10) << "SizeCeph encode: empty input, creating empty chunks" << dendl;
     for (const auto& shard : want_to_encode) {
       (*encoded)[shard] = ceph::bufferlist();
     }
@@ -512,14 +456,6 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
     return -EINVAL;
   }
 
-  dout(10) << "SizeCeph encode: size=" << in.length() 
-           << " want=" << want_to_encode.size() << dendl;
-  printf("SizeCeph encode DEBUG: called with input.length=%u want_to_encode.size=%zu\n", 
-         (unsigned)in.length(), want_to_encode.size());
-  for (const auto& shard : want_to_encode) {
-    printf("  want shard %d\n", (int)shard.id);
-  }
-  
   // ================================================================================
   // ENCODE PROCESSING - Use get_chunk_size() for proper size calculation
   // ================================================================================
@@ -545,20 +481,6 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
   // Use SIMD-aligned allocation for optimal performance (consistent with ErasureCode.cc)
   std::vector<unsigned char*> output_ptrs(SIZECEPH_N);
   
-  // debug output initialization
-  printf("SizeCeph encode DEBUG: preparing to allocate %u-byte chunks for %zu shards\n", 
-         chunk_size, want_to_encode.size());
-  if (encoded && encoded->size() != 0) {
-    for (const auto& shard : want_to_encode) {
-      (*encoded)[shard] = ceph::bufferlist();
-      if ((*encoded)[shard].length() != 0) {
-        dout(0) << "SizeCeph encode: encoded output chunk " << shard.id 
-                << " is not empty at initialization" << dendl;
-        ceph_assert((*encoded)[shard].length() == 0);
-        //bellow we are allocating for no reason!!
-      }
-    }
-  }
 
   for (const auto& wanted_shard : want_to_encode) {
     // Allocate SIMD-aligned buffer for optimal vectorized operations (SIMD_ALIGN = 64)
@@ -583,33 +505,9 @@ int ErasureCodeSizeCeph::encode(const shard_id_set &want_to_encode,
   // Create contiguous buffer for SizeCeph (it needs contiguous memory)
   ceph::bufferptr contiguous_input = ceph::buffer::create(input_length);
   in.begin().copy(input_length, contiguous_input.c_str());
-  printf("SizeCeph encode DEBUG: about to call size_split_func with input_length=%u chunk_size=%u\n", 
-         input_length, chunk_size);
-  size_split_func(output_ptrs.data(), (unsigned char*)contiguous_input.c_str(), input_length);
-  printf("SizeCeph encode DEBUG: size_split_func completed, checking output lengths\n");
-  for (const auto& wanted_shard : want_to_encode) {
-    printf("  output shard %d length=%u\n", (int)wanted_shard.id, (unsigned)(*encoded)[wanted_shard].length());
-  }
 
-  // Check outbuffers have different content than zeroed buffers
-  for (const auto& wanted_shard : want_to_encode) {
-    bool all_zero = true;
-    const unsigned char* out_ptr = (const unsigned char*)(*encoded)[wanted_shard].c_str();
-    for (unsigned int i = 0; i < chunk_size; ++i) {
-      if (out_ptr[i] != 0) {
-        all_zero = false;
-        break;
-      }
-    }
-    if (all_zero) {
-      dout(0) << "SizeCeph encode: output chunk " << wanted_shard.id 
-              << " is still all zeros after encoding!" << dendl;
-      ceph_assert(!all_zero);
-    }
-  }
-  
-  dout(10) << "SizeCeph encode: successfully encoded " << encoded->size() 
-           << " chunks (" << input_length << " bytes)" << dendl;
+  size_split_func(output_ptrs.data(), (unsigned char*)contiguous_input.c_str(), input_length);
+
   return 0;
 }
 
@@ -648,12 +546,11 @@ int ErasureCodeSizeCeph::encode_chunks(const shard_id_map<ceph::bufferptr> &in,
 }
 
 void ErasureCodeSizeCeph::encode_delta(const ceph::bufferptr &old_data,
-                                       const ceph::bufferptr &new_data,  
+                                       const ceph::bufferptr &new_data,
                                        ceph::bufferptr *delta_maybe_in_place) {
   // Delta encoding is not meaningful for SizeCeph's always-decode architecture
   // SizeCeph transforms data in complex, non-linear ways that don't support
   // incremental updates. Any change requires full re-encoding.
-  dout(0) << "SizeCeph encode_delta: not supported - SizeCeph requires full re-encoding for any changes" << dendl;
   
   // Return an empty buffer to indicate no delta support
   *delta_maybe_in_place = ceph::bufferptr();
@@ -664,7 +561,6 @@ void ErasureCodeSizeCeph::apply_delta(const shard_id_map<ceph::bufferptr> &in,
   // Delta application is not supported for SizeCeph's always-decode architecture
   // SizeCeph's non-linear transformation algorithm requires complete re-encoding
   // for any data changes, making incremental parity updates meaningless.
-  dout(0) << "SizeCeph apply_delta: not supported - use full encode/decode cycle instead" << dendl;
   
   // Clear output to indicate no delta support
   out.clear();
@@ -680,7 +576,6 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
   
   // Load SizeCeph library first
   if (!load_sizeceph_library()) {
-    dout(0) << "SizeCeph decode: failed to load SizeCeph library" << dendl;
     return -ENOENT;
   }
 
@@ -710,12 +605,9 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
     effective_chunk_size = chunks.begin()->second.length();
   }
   if (effective_chunk_size == 0) {
-    dout(0) << "SizeCeph decode: all chunks are empty" << dendl;
     return -EINVAL;
   }
   
-  dout(10) << "SizeCeph decode: want=" << want_to_read.size() 
-           << " available=" << chunks.size() << " chunk_size=" << effective_chunk_size << dendl;
   
   // ================================================================================
   // DECODE PROCESSING
@@ -740,19 +632,6 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
     }
   }
 
-  // Debug: log what was provided to decode()
-  {
-    std::ostringstream oss;
-    oss << "SizeCeph decode: chunks provided={";
-    bool first = true;
-    for (unsigned int i = 0; i < SIZECEPH_N; ++i) {
-      if (!first) oss << ",";
-      oss << i << ":" << (chunk_copies[i].length());
-      first = false;
-    }
-    oss << "} effective_chunk_size=" << effective_chunk_size;
-    dout(5) << oss.str() << dendl;
-  }
   
   // Check restore capability
   std::vector<const unsigned char*> const_input_chunks(SIZECEPH_N);
@@ -761,7 +640,6 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
   }
   
   if (!size_can_get_restore_func(const_input_chunks.data())) {
-    dout(0) << "SizeCeph decode: pattern cannot be restored" << dendl;
     return -ENOTSUP;
   }
   
@@ -773,17 +651,14 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
   
   int restore_result = size_restore_func(output_ptr, const_input_chunks.data(), original_data_size);
   if (restore_result != 0) {
-    dout(0) << "SizeCeph decode: restore failed with code " << restore_result << dendl;
     return -EIO;
   }
 
-  dout(5) << "SizeCeph decode: restore_result=" << restore_result << " restored_len=" << original_data_size << dendl;
   // Handle chunk requests
   for (const auto& wanted_shard : want_to_read) {
     shard_id_t shard_id = wanted_shard;
     
     if ((unsigned int)shard_id.id >= SIZECEPH_N) {
-      dout(0) << "SizeCeph decode: invalid chunk id " << shard_id.id << dendl;
       return -EINVAL;
     }
     
@@ -823,8 +698,6 @@ int ErasureCodeSizeCeph::decode(const shard_id_set &want_to_read,
     (*decoded)[shard_id] = chunk_bl;
   }
   
-  dout(10) << "SizeCeph decode: successfully decoded " << decoded->size() 
-           << " chunks" << dendl;
   return 0;
 }
 
@@ -877,20 +750,8 @@ const std::vector<shard_id_t> &ErasureCodeSizeCeph::get_chunk_mapping() const {
 int ErasureCodeSizeCeph::decode_concat(const std::set<int>& want_to_read,
                                        const std::map<int, ceph::bufferlist> &chunks,
                                        ceph::bufferlist *decoded) {
-  dout(10) << "SizeCeph decode_concat: deprecated function called with want_to_read=" 
-           << want_to_read.size() << " chunks=" << chunks.size() << dendl;
-  
-  // Debug: detailed logging
-  printf("SizeCeph decode_concat: want_to_read.size=%zu chunks.size=%zu\n", want_to_read.size(), chunks.size());
-  for (int id : want_to_read) {
-    printf("  want_to_read[%d]\n", id);
-  }
-  for (auto &p : chunks) {
-    printf("  chunks[%d] length=%u\n", p.first, (unsigned)p.second.length());
-  }
   
   if (!decoded) {
-    dout(0) << "SizeCeph decode_concat: decoded buffer is null" << dendl;
     return -EINVAL;
   }
   
@@ -935,18 +796,14 @@ int ErasureCodeSizeCeph::decode_concat(const std::set<int>& want_to_read,
              << decoded->length() << " bytes (all requested shards in order)" << dendl;
   }
   
-  printf("SizeCeph decode_concat: returning ret=%d decoded_length=%u\n", ret, (unsigned)decoded->length());
   return ret;
 }
 
 [[deprecated]]
 int ErasureCodeSizeCeph::decode_concat(const std::map<int, ceph::bufferlist> &chunks,
                                        ceph::bufferlist *decoded) {
-  dout(10) << "SizeCeph decode_concat: deprecated function called with chunks=" 
-           << chunks.size() << dendl;
   
   if (!decoded) {
-    dout(0) << "SizeCeph decode_concat: decoded buffer is null" << dendl;
     return -EINVAL;
   }
   
@@ -978,7 +835,6 @@ ErasureCodeSizeCeph::plugin_flags ErasureCodeSizeCeph::get_supported_optimizatio
   // - FLAG_EC_PLUGIN_OPTIMIZED_SUPPORTED: Basic optimized EC is supported
   // - FLAG_EC_PLUGIN_ZERO_PADDING_OPTIMIZATION: We can handle zero-length buffers
   //
-  dout(15) << "SizeCeph get_supported_optimizations: disabling partial operations for efficiency" << dendl;
   
   return FLAG_EC_PLUGIN_OPTIMIZED_SUPPORTED | FLAG_EC_PLUGIN_ZERO_PADDING_OPTIMIZATION;
 }
